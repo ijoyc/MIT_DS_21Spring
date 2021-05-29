@@ -41,19 +41,18 @@ type Coordinator struct {
 
 	pendingIndexes []int
 	finishedCount int
-	mutex sync.Mutex
+	mutex sync.RWMutex
 }
 
 func (c *Coordinator) finished() bool {
+	c.mutex.RLock()
+	defer func() { c.mutex.RUnlock() }()
 	return c.finishedCount == len(c.Tasks)
 }
 
 // ================== RPC handlers for the worker to call ==================
 
 func (c *Coordinator) GetTask(req GetTaskRequest, res *GetTaskResponse) error {
-	c.mutex.Lock()
-	defer func() { c.mutex.Unlock() }()
-
 	if c.finished() {
 		log.Println("All tasks are finished, please exit.")
 		res.Command = Exit
@@ -61,6 +60,9 @@ func (c *Coordinator) GetTask(req GetTaskRequest, res *GetTaskResponse) error {
 		log.Println("All tasks are ongoing, please wait for a while.")
 		res.Command = Wait
 	} else {
+		c.mutex.Lock()
+		defer func() { c.mutex.Unlock() }()
+		
 		index := c.pendingIndexes[0]
 		task := c.Tasks[index]
 		if task.State != Ready {
