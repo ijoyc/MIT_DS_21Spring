@@ -8,7 +8,7 @@ import "os"
 import "time"
 import "io/ioutil"
 import "encoding/json"
-
+import "sort"
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +24,14 @@ type MapWorker struct {
 	// {reduce task number: [kvs]}
 	intermediate map[int][]KeyValue
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -59,7 +67,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				notifyTaskFinish(res.ID, Maping, paths)
 			}
 		} else if res.Command == Reduce {
-			if doReduce() {
+			if doReduce(res.Paths, res.ID, reducef) {
 				notifyTaskFinish(res.ID, Reducing, res.Paths)
 			}
 		}
@@ -132,7 +140,57 @@ func writeIntermediate(mapWorker MapWorker) ([]string, bool) {
 
 // ================== Reduce ==================
 
-func doReduce() bool {
+func doReduce(paths []string, reduceTaskNum int, reducef func(string, []string) string) bool {
+	kva := readAll(paths)
+
+	sort.Sort(ByKey(kva))
+
+	return writeResult(kva, reduceTaskNum, reducef)
+}
+
+func readAll(paths []string) []KeyValue {
+	var kva []KeyValue
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			log.Printf("worder: cannot open file %s for read: %v\n", path, err)
+			continue
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+	}
+	return kva
+}
+
+func writeResult(kva []KeyValue, reduceTaskNum int, reducef func(string, []string) string) bool {
+	targetPath := fmt.Sprintf("mr-out-%d", reduceTaskNum)
+	file, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR, 0755)
+	if err != nil {
+		fmt.Printf("Cannot open file %s to write, err: %v\n", targetPath, err)
+		return false
+	}
+
+	i := 0
+	for i < len(kva) {
+		j := i
+		currentKey := kva[i].Key
+		var values []string
+		for j < len(kva) && kva[j].Key == currentKey {
+			values = append(values, kva[j].Value)
+			j++
+		}
+		output := reducef(currentKey, values)
+		fmt.Fprintf(file, "%v %v\n", currentKey, output)
+		i = j
+	}
+
+	file.Close()
 	return true
 }
 
