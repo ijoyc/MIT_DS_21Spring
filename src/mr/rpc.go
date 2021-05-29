@@ -12,7 +12,8 @@ import "strconv"
 type Command int
 
 const (
-	Exec Command = iota
+	Map Command = iota
+	Reduce
 	Wait
 	Exit
 )
@@ -23,6 +24,13 @@ const (
 	OK Status = iota
 )
 
+type Stage int
+
+const (
+	Maping Stage = iota
+	Reducing
+)
+
 type GetTaskRequest struct {
 
 }
@@ -30,12 +38,14 @@ type GetTaskRequest struct {
 type GetTaskResponse struct {
 	Command Command
 	ID int
-	Path string
+	Paths []string
 	ReduceNum int
 }
 
 type FinishTaskRequest struct {
 	ID int
+	Kind Stage
+	Paths []string
 }
 
 type FinishTaskResponse struct {

@@ -18,7 +18,7 @@ type KeyValue struct {
 	Value string
 }
 
-type MapTask struct {
+type MapWorker struct {
 	id int
 	reduceNum int
 	// {reduce task number: [kvs]}
@@ -39,62 +39,77 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	req := GetTaskRequest{}
-	res := GetTaskResponse{}
-	for call("Coordinator.GetTask", req, &res) {
+	// !!! If server set nil or 0 to an field on res, that field keep its original value, rather than change to nil or 0.
+	// So everytime we should use a new object as the receiver.
+	for true {
+		req := GetTaskRequest{}
+		res := GetTaskResponse{}
+
+		if !call("Coordinator.GetTask", req, &res) { 
+			break 
+		}
+
 		if res.Command == Exit {
 			break
 		} else if res.Command == Wait {
 			time.Sleep(time.Second)
-		} else {
-			if doMap(res.Path, res.ID, res.ReduceNum, mapf) {
-				notifyTaskFinish(res.ID)
+		} else if res.Command == Map {
+			paths, ok := doMap(res.Paths, res.ID, res.ReduceNum, mapf)
+			if ok {
+				notifyTaskFinish(res.ID, Maping, paths)
+			}
+		} else if res.Command == Reduce {
+			if doReduce() {
+				notifyTaskFinish(res.ID, Reducing, res.Paths)
 			}
 		}
 	}
 }
 
+// ================== Map ==================
+
 func intermediatePath(ID int, reduceTaskNum int) string {
 	return fmt.Sprintf("mr-%d-%d", ID, reduceTaskNum)
 }
 
-func doMap(path string, ID int, reduceNum int, mapf func(string, string) []KeyValue) bool {
-	var mapTask MapTask
-	mapTask.id = ID
-	mapTask.reduceNum = reduceNum
-	mapTask.intermediate = make(map[int][]KeyValue)
+func doMap(paths []string, ID int, reduceNum int, mapf func(string, string) []KeyValue) ([]string, bool) {
+	var mapWorker MapWorker
+	mapWorker.id = ID
+	mapWorker.reduceNum = reduceNum
+	mapWorker.intermediate = make(map[int][]KeyValue)
 
-	file, err := os.Open(path)
-	if err != nil {
-		log.Println("worker: cannot open ", path, err)
-		return false
-	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Println("worker: cannot read ", path, err)
-		return false
-	}
-	file.Close()
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			log.Println("worker: cannot open ", path, err)
+			return nil, false
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Println("worker: cannot read ", path, err)
+			return nil, false
+		}
+		file.Close()
 
-	kva := mapf(path, string(content))
-	for _, kv := range kva {
-		reduceTaskNum := ihash(kv.Key) % reduceNum
-		mapTask.intermediate[reduceTaskNum] = append(mapTask.intermediate[reduceTaskNum], kv)
+		kva := mapf(path, string(content))
+		for _, kv := range kva {
+			reduceTaskNum := ihash(kv.Key) % reduceNum
+			mapWorker.intermediate[reduceTaskNum] = append(mapWorker.intermediate[reduceTaskNum], kv)
+		}
 	}
 
-	if !writeIntermediate(mapTask) {
-		return false
-	}
-	return true
+	return writeIntermediate(mapWorker)
 }
 
-func writeIntermediate(mapTask MapTask) bool {
-	for reduceTaskNum, kva := range mapTask.intermediate {
-		targetPath := intermediatePath(mapTask.id, reduceTaskNum)
+func writeIntermediate(mapWorker MapWorker) ([]string, bool) {
+	targetPaths := make([]string, mapWorker.reduceNum)
+
+	for reduceTaskNum, kva := range mapWorker.intermediate {
+		targetPath := intermediatePath(mapWorker.id, reduceTaskNum)
 		tmpfile, err := ioutil.TempFile("", targetPath)
 		if err != nil {
 			log.Printf("worker: cannot create tmp file with prefix %v, err: %v\n", targetPath, err)
-			return false
+			return nil, false
 		}
 
 		defer os.Remove(tmpfile.Name())
@@ -104,19 +119,30 @@ func writeIntermediate(mapTask MapTask) bool {
 			err = enc.Encode(&kv)
 			if err != nil {
 				log.Printf("worder: cannot encode json to file %v, err: %v\n", tmpfile.Name(), err)
-				return false
+				return nil, false
 			}
 		}
 
 		os.Rename(tmpfile.Name(), targetPath)
+		targetPaths[reduceTaskNum] = targetPath
 	}
 
+	return targetPaths, true
+}
+
+// ================== Reduce ==================
+
+func doReduce() bool {
 	return true
 }
 
-func notifyTaskFinish(ID int) {
+// ================== Utils ==================
+
+func notifyTaskFinish(ID int, kind Stage, paths []string) {
 	req := FinishTaskRequest{}
 	req.ID = ID
+	req.Kind = kind
+	req.Paths = paths
 	res := FinishTaskResponse{}
 	call("Coordinator.FinishTask", req, &res)
 }
